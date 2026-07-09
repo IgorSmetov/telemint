@@ -9,19 +9,30 @@ _ unwrap_signed_cmd(slice signed_cmd, int public_key, int subwallet_id, int msg_
     return cmd;
 }
 
-_ unpack_deploy_msg_v2(slice cs) inline {
-    var res = (
-            cs~load_text(), ;; token_name
-            cs~load_ref(), ;; content
-            cs~load_ref(), ;; auction_config
-            cs~load_maybe_ref(), ;; royalty
-            cs~load_maybe_ref() ;; restrictions
-    );
+;; Flexible unpacking that supports both V1 and V2 message formats
+;; V1: token_name, content, auction_config, royalty
+;; V2: token_name, content, auction_config, royalty, restrictions
+_ unpack_deploy_msg_flexible(slice cs) inline {
+    var token_name = cs~load_text();
+    var content = cs~load_ref();
+    var auction_config = cs~load_ref();
+    var royalty = cs~load_maybe_ref();
+    
+    ;; V1 messages end here, V2 messages have restrictions field
+    var restrictions = null();
+    ifnot (cs.slice_empty?()) {
+        ;; Try to load restrictions for V2 messages
+        ;; If there's data remaining and it's a ref, it's the restrictions
+        if (cs.slice_refs() > 0) {
+            restrictions = cs~load_maybe_ref();
+        }
+    }
+    
     cs.end_parse();
-    return res;
+    return (token_name, content, auction_config, royalty, restrictions);
 }
+
 const int err::invalid_sender_address = 224;
-const int op::telemint_msg_deploy_v2 = 0x4637289b;
 slice check_restrictions(cell restrictions, slice sender_address) impure inline {
   if (~ cell_null?(restrictions)) {
      slice cs = restrictions.begin_parse();
@@ -40,7 +51,7 @@ slice check_restrictions(cell restrictions, slice sender_address) impure inline 
 }
 
 () deploy_item(slice sender_address, int bid, cell item_code, slice cmd, slice full_domain, cell default_royalty_params) impure {
-    var (token_name, content, auction_config, royalty, restrictions) = unpack_deploy_msg_v2(cmd);
+    var (token_name, content, auction_config, royalty, restrictions) = unpack_deploy_msg_flexible(cmd);
     sender_address = check_restrictions(restrictions, sender_address);
 
     (slice beneficiary_address, int initial_min_bid, int max_bid, int min_bid_step, int min_extend_time, _) = unpack_auction_config(auction_config);
@@ -75,7 +86,9 @@ slice check_restrictions(cell restrictions, slice sender_address) impure inline 
         return ();
     }
 
-    throw_unless(err::unknown_op, op == op::telemint_msg_deploy_v2);
+    ;; Accept both V1 (0x4637289a) and V2 (0x4637289b) deployment operations
+    ;; for backward compatibility
+    throw_unless(err::unknown_op, (op == op::telemint_msg_deploy) | (op == op::telemint_msg_deploy_v2));
 
     var (_, subwallet_id, public_key, _, item_code, full_domain, default_royalty_params) = unpack_collection_data();
     var cmd = unwrap_signed_cmd(in_msg_body, public_key, subwallet_id, msg_value);
